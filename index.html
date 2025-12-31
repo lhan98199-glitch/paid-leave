@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>企业员工休假云同步管理系统</title>
+    <style>
+        :root { --primary: #4a90e2; --blue-leave: #3498db; --yellow-leave: #f1c40f; --bg: #f4f7f6; }
+        body { font-family: 'PingFang SC', sans-serif; background: var(--bg); margin: 0; padding: 20px; display: flex; gap: 20px; height: 100vh; box-sizing: border-box; }
+        
+        /* 侧边栏 */
+        .sidebar { width: 350px; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); display: flex; flex-direction: column; }
+        .employee-list { flex: 1; overflow-y: auto; margin-top: 15px; }
+        .employee-item { display: flex; justify-content: space-between; align-items: center; padding: 15px; border: 1px solid #eee; margin-bottom: 10px; border-radius: 8px; cursor: pointer; transition: 0.2s; }
+        .employee-item.active { border-color: var(--primary); background: #f0f7ff; box-shadow: inset 4px 0 0 var(--primary); }
+        .badge-group { display: flex; gap: 5px; margin-top: 5px; }
+        .badge { font-size: 10px; padding: 2px 5px; border-radius: 3px; color: white; }
+
+        /* 主内容 */
+        .main-content { flex: 1; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); overflow-y: auto; position: relative; }
+        .sync-banner { background: #f6ffed; border: 1px solid #b7eb8f; padding: 10px 15px; margin-bottom: 15px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+        
+        /* 日历 */
+        .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+        .weekday { text-align: center; color: #999; font-size: 12px; padding-bottom: 8px; }
+        .day { height: 60px; border: 1px solid #f0f0f0; border-radius: 6px; padding: 6px; cursor: pointer; position: relative; }
+        .day:hover { border-color: var(--primary); background: #fafafa; }
+        .day.leave-blue { background: var(--blue-leave) !important; color: white; border-color: var(--blue-leave); }
+        .day.leave-yellow { background: var(--yellow-leave) !important; color: white; border-color: var(--yellow-leave); }
+
+        /* 缩略图 */
+        .year-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 15px; }
+        .month-mini { background: #fafafa; padding: 8px; border-radius: 8px; border: 1px solid #eee; cursor: pointer; transition: 0.2s; }
+        .month-mini:hover { border-color: var(--primary); transform: translateY(-2px); background: #fff; }
+        .month-mini.active-month { border: 2px solid var(--primary); background: #fff; }
+        .mini-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; pointer-events: none; }
+        .m-day { width: 8px; height: 8px; background: #e0e0e0; border-radius: 1px; }
+        .m-day.has-blue { background: var(--blue-leave); }
+        .m-day.has-yellow { background: var(--yellow-leave); }
+
+        .btn { background: var(--primary); color: white; border: none; padding: 8px 15px; border-radius: 6px; cursor: pointer; }
+        input { padding: 8px; border: 1px solid #ddd; border-radius: 6px; outline: none; }
+        .loading-mask { position: absolute; top:0; left:0; right:0; bottom:0; background: rgba(255,255,255,0.6); display:none; z-index:10; border-radius: 12px; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h3>管理看板</h3>
+    <div style="display:flex; gap:5px; margin-bottom:15px;">
+        <input type="text" id="newEmpName" placeholder="输入姓名" style="flex:1;">
+        <button class="btn" onclick="addEmployee()">添加</button>
+    </div>
+    <div class="employee-list" id="employeeList">正在读取云端数据...</div>
+    <button class="btn" style="background:#8c8c8c; margin-top:10px;" onclick="loadFromCloud()">🔄 强制刷新数据</button>
+</div>
+
+<div class="main-content">
+    <div id="loader" class="loading-mask"></div>
+    
+    <div class="sync-banner">
+        <span id="syncStatus">状态: 🟢 已连接云端</span>
+        <small style="color:#888">所有修改将实时同步</small>
+    </div>
+
+    <div class="calendar-header">
+        <button class="btn" onclick="changeMonth(-1)">◀</button>
+        <h2 id="monthTitle" style="margin:0;">2024年 1月</h2>
+        <button class="btn" onclick="changeMonth(1)">▶</button>
+    </div>
+
+    <div class="calendar-grid" id="calendarGrid"></div>
+
+    <div style="margin-top:30px; border-top:1px solid #eee; padding-top:20px;">
+        <h3>年度预览 (点击月份跳转)</h3>
+        <div class="year-grid" id="yearOverviewGrid"></div>
+    </div>
+</div>
+
+<script>
+    // ================= 配置区域 =================
+    const BIN_ID = '6953a5b1d0ea881f40493e2a'; 
+    const API_KEY = '$2a$10$ieam.IclH9cyOpwC5al6v.Y1RB7PtAbt.p.ApPwHqOc.tItyYr66i';
+    // ============================================
+
+    let employees = [];
+    let currentIdx = 0;
+    let viewDate = new Date();
+
+    async function init() {
+        await loadFromCloud();
+        renderAll();
+    }
+
+    // 云端读取
+    async function loadFromCloud() {
+        setLoading(true);
+        try {
+            const res = await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}/latest`, {
+                headers: { 'X-Master-Key': API_KEY, 'Cache-Control': 'no-cache' }
+            });
+            const data = await res.json();
+            employees = data.record || [];
+            updateSyncStatus('🟢 数据已实时同步', '#52c41a');
+        } catch (e) {
+            updateSyncStatus('🔴 读取失败，请检查配置', '#ff4d4f');
+        }
+        setLoading(false);
+        renderAll();
+    }
+
+    // 云端保存 (自动调用)
+    async function saveToCloud() {
+        updateSyncStatus('⏳ 正在同步到云端...', '#faad14');
+        try {
+            await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-Master-Key': API_KEY },
+                body: JSON.stringify(employees)
+            });
+            updateSyncStatus('🟢 所有更改已存至云端', '#52c41a');
+        } catch (e) {
+            updateSyncStatus('🔴 同步失败，请检查网络', '#ff4d4f');
+        }
+    }
+
+    function renderAll() {
+        renderSidebar();
+        renderMainCalendar();
+        renderYearOverview();
+    }
+
+    function renderSidebar() {
+        const list = document.getElementById('employeeList');
+        list.innerHTML = '';
+        employees.forEach((emp, i) => {
+            let b = 0, y = 0;
+            Object.values(emp.leaves).forEach(v => { if(v==='blue') b++; if(v==='yellow') y++; });
+            const rem = emp.total - (b + y * 0.5);
+            list.innerHTML += `
+                <div class="employee-item ${i === currentIdx ? 'active' : ''}" onclick="currentIdx=${i};renderAll();">
+                    <div style="flex:1">
+                        <strong>${emp.name}</strong>
+                        <div class="badge-group">
+                            <span class="badge" style="background:var(--blue-leave)">蓝:${b}</span>
+                            <span class="badge" style="background:var(--yellow-leave);color:#000">黄:${y}</span>
+                            <span class="badge" style="background:${rem < 3 ? '#ff4d4f' : '#2ecc71'}">余:${rem}</span>
+                        </div>
+                    </div>
+                    <button onclick="deleteEmp(event, ${i})" style="border:none;background:none;color:#ccc;cursor:pointer;font-size:18px;">✕</button>
+                </div>`;
+        });
+    }
+
+    function renderMainCalendar() {
+        const grid = document.getElementById('calendarGrid');
+        const emp = employees[currentIdx];
+        if(!emp) { grid.innerHTML="<p style='grid-column:span 7;text-align:center;color:#999'>请先添加员工</p>"; return; }
+        
+        const year = viewDate.getFullYear(), month = viewDate.getMonth();
+        document.getElementById('monthTitle').innerText = `${year}年 ${month + 1}月`;
+        grid.innerHTML = '';
+        ['日','一','二','三','四','五','六'].forEach(d => grid.innerHTML += `<div class="weekday">${d}</div>`);
+        
+        const firstDay = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        for (let i = 0; i < firstDay; i++) grid.innerHTML += `<div></div>`;
+        
+        for (let d = 1; d <= daysInMonth; d++) {
+            const key = `${year}-${month+1}-${d}`;
+            const status = emp.leaves[key] || '';
+            const dayDiv = document.createElement('div');
+            dayDiv.className = `day ${status ? 'leave-'+status : ''}`;
+            dayDiv.innerHTML = `<b>${d}</b>`;
+            dayDiv.onclick = async () => {
+                if(!status) emp.leaves[key] = 'blue';
+                else if(status === 'blue') emp.leaves[key] = 'yellow';
+                else delete emp.leaves[key];
+                renderAll();
+                await saveToCloud();
+            };
+            grid.appendChild(dayDiv);
+        }
+    }
+
+    function renderYearOverview() {
+        const yearGrid = document.getElementById('yearOverviewGrid');
+        const emp = employees[currentIdx];
+        if(!emp) return;
+        const year = viewDate.getFullYear();
+        const curM = viewDate.getMonth();
+        yearGrid.innerHTML = '';
+        for (let m = 0; m < 12; m++) {
+            let html = `<div class="month-mini ${m===curM?'active-month':''}" onclick="viewDate.setMonth(${m});renderAll();">
+                <div style="font-size:11px;font-weight:bold;margin-bottom:3px;">${m+1}月</div><div class="mini-days">`;
+            const days = new Date(year, m + 1, 0).getDate();
+            const start = new Date(year, m, 1).getDay();
+            for(let i=0; i<start; i++) html += `<div class="m-day" style="opacity:0"></div>`;
+            for(let d=1; d<=days; d++) {
+                const s = emp.leaves[`${year}-${m+1}-${d}`];
+                html += `<div class="m-day ${s?'has-'+s:''}"></div>`;
+            }
+            yearGrid.innerHTML += html + `</div></div>`;
+        }
+    }
+
+    async function addEmployee() {
+        const name = document.getElementById('newEmpName').value;
+        if(name) {
+            employees.push({name, leaves:{}, total:15});
+            document.getElementById('newEmpName').value = '';
+            renderAll();
+            await saveToCloud();
+        }
+    }
+
+    async function deleteEmp(e, i) {
+        e.stopPropagation();
+        if(confirm(`确定删除员工 ${employees[i].name} 吗？`)) {
+            employees.splice(i, 1);
+            if(currentIdx >= employees.length) currentIdx = 0;
+            renderAll();
+            await saveToCloud();
+        }
+    }
+
+    function changeMonth(s) { viewDate.setMonth(viewDate.getMonth()+s); renderAll(); }
+    function setLoading(s) { document.getElementById('loader').style.display = s ? 'block' : 'none'; }
+    function updateSyncStatus(txt, color) { 
+        const el = document.getElementById('syncStatus');
+        el.innerText = `状态: ${txt}`;
+        el.parentElement.style.borderColor = color;
+    }
+
+    init();
+</script>
+</body>
+</html>
